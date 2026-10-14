@@ -1,0 +1,285 @@
+// =====================================================================
+//  BackToMe · Modelo de datos (DBML)
+//  Pegar este contenido en https://dbdiagram.io/d para ver y editar
+//  el diagrama. Exportable a PNG / PDF / SQL desde el menú "Export".
+// =====================================================================
+
+Project BackToMe {
+  database_type: 'PostgreSQL'
+  Note: '''
+  Plataforma SaaS multi-tenant para la gestión, trazabilidad y custodia
+  de objetos perdidos. Todas las tablas institucionales llevan tenant_id
+  y están protegidas con Row-Level Security (RLS) en PostgreSQL.
+  '''
+}
+
+// ---------------------------------------------------------------------
+// Tipos enumerados
+// ---------------------------------------------------------------------
+Enum estado_tenant {
+  prueba
+  activo
+  suspendido
+}
+
+Enum rol_usuario {
+  alumno
+  colaborador
+  operador
+  admin_tenant
+}
+
+Enum estado_objeto {
+  en_custodia
+  en_reclamo
+  entregado
+  desechado
+  donado
+}
+
+Enum estado_reclamo {
+  pendiente
+  aprobado
+  rechazado
+}
+
+Enum tipo_movimiento {
+  ingreso
+  traslado
+  entrega
+  desecho
+  donacion
+}
+
+// ---------------------------------------------------------------------
+// Núcleo multi-tenant
+// ---------------------------------------------------------------------
+Table tenants [headercolor: #534AB7] {
+  id uuid [pk, default: `gen_random_uuid()`]
+  nombre text [not null]
+  slug text [not null, unique]
+  plan text [not null, default: 'anual']
+  estado estado_tenant [not null, default: 'prueba']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  Note: 'Organización cliente (universidad o empresa)'
+}
+
+Table tenant_dominios [headercolor: #534AB7] {
+  id uuid [pk, default: `gen_random_uuid()`]
+  tenant_id uuid [not null, ref: > tenants.id]
+  dominio citext [not null, unique, note: 'Ej: duocuc.cl']
+  created_at timestamptz [not null, default: `now()`]
+  Note: 'HU-01: mapeo de dominio de correo a tenant'
+}
+
+Table sedes [headercolor: #534AB7] {
+  id uuid [pk, default: `gen_random_uuid()`]
+  tenant_id uuid [not null, ref: > tenants.id]
+  nombre text [not null]
+  direccion text
+  activa boolean [not null, default: true]
+  created_at timestamptz [not null, default: `now()`]
+  indexes {
+    (tenant_id, nombre) [unique]
+  }
+}
+
+// ---------------------------------------------------------------------
+// Usuarios y autenticación
+// ---------------------------------------------------------------------
+Table usuarios [headercolor: #0F6E56] {
+  id uuid [pk, default: `gen_random_uuid()`]
+  tenant_id uuid [not null, ref: > tenants.id]
+  sede_id uuid [ref: > sedes.id]
+  email citext [not null]
+  nombre text [not null]
+  rut_cifrado bytea [note: 'Cifrado AES-256 desde la aplicación']
+  rol rol_usuario [not null, default: 'alumno']
+  password_hash text [note: 'Argon2/BCrypt. NULL si usa OAuth/OTP']
+  consentimiento_at timestamptz [note: 'Opt-in Ley 19.628 / 21.719']
+  activo boolean [not null, default: true]
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  indexes {
+    (tenant_id, email) [unique]
+  }
+}
+
+Table otp_codigos [headercolor: #0F6E56] {
+  id uuid [pk, default: `gen_random_uuid()`]
+  tenant_id uuid [not null]
+  usuario_id uuid [not null, ref: > usuarios.id]
+  codigo_hash text [not null]
+  expira_en timestamptz [not null, note: 'now() + 5 minutos']
+  usado boolean [not null, default: false]
+  intentos smallint [not null, default: 0]
+  created_at timestamptz [not null, default: `now()`]
+  Note: 'HU-01: contingencia OTP de 6 dígitos'
+}
+
+// ---------------------------------------------------------------------
+// Catálogo, enrolamiento y custodia
+// ---------------------------------------------------------------------
+Table categorias [headercolor: #993C1D] {
+  id uuid [pk, default: `gen_random_uuid()`]
+  tenant_id uuid [not null, ref: > tenants.id]
+  nombre text [not null]
+  es_sensible boolean [not null, default: false, note: 'Documentos/tarjetas: obliga a difuminar fotos']
+  activa boolean [not null, default: true]
+  indexes {
+    (tenant_id, nombre) [unique]
+  }
+}
+
+Table bienes_enrolados [headercolor: #993C1D] {
+  id uuid [pk, default: `gen_random_uuid()`]
+  tenant_id uuid [not null]
+  usuario_id uuid [not null, ref: > usuarios.id]
+  categoria_id uuid [not null, ref: > categorias.id]
+  nombre text [not null]
+  atributos jsonb [not null, default: '{}', note: 'marca, color, número de serie']
+  qr_hash text [not null, unique, note: 'Hash aleatorio no adivinable']
+  activo boolean [not null, default: true]
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  Note: 'HU-03: máximo 30 bienes activos por usuario (trigger)'
+}
+
+Table objetos_encontrados [headercolor: #993C1D] {
+  id uuid [pk, default: `gen_random_uuid()`]
+  tenant_id uuid [not null]
+  sede_id uuid [not null, ref: > sedes.id]
+  categoria_id uuid [not null, ref: > categorias.id]
+  registrado_por uuid [not null, ref: > usuarios.id, note: 'Operador que lo ingresó']
+  bien_enrolado_id uuid [ref: > bienes_enrolados.id, note: 'Si se identificó por QR']
+  marca text
+  modelo text
+  color text
+  ubicacion_hallazgo text [not null]
+  fecha_hallazgo timestamptz [not null, default: `now()`]
+  atributos_publicos jsonb [not null, default: '{}', note: 'Visible en catálogo ciego']
+  atributos_privados jsonb [not null, default: '{}', note: 'Rasgos definitorios, ocultos']
+  estado estado_objeto [not null, default: 'en_custodia']
+  fecha_cierre timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  Note: 'HU-02: registro de objetos encontrados'
+}
+
+Table fotos_objeto [headercolor: #993C1D] {
+  id uuid [pk, default: `gen_random_uuid()`]
+  tenant_id uuid [not null]
+  objeto_id uuid [not null, ref: > objetos_encontrados.id]
+  r2_key text [not null, unique, note: 'Clave en Cloudflare R2']
+  es_publica boolean [not null, default: false]
+  difuminada boolean [not null, default: false]
+  created_at timestamptz [not null, default: `now()`]
+}
+
+Table preguntas_desempate [headercolor: #993C1D] {
+  id uuid [pk, default: `gen_random_uuid()`]
+  tenant_id uuid [not null]
+  objeto_id uuid [not null, ref: > objetos_encontrados.id]
+  pregunta text [not null]
+  respuesta_esperada text [not null, note: 'Nunca se expone en la API pública']
+  orden smallint [not null, default: 1]
+}
+
+Table movimientos_custodia [headercolor: #993C1D] {
+  id uuid [pk, default: `gen_random_uuid()`]
+  tenant_id uuid [not null]
+  objeto_id uuid [not null, ref: > objetos_encontrados.id]
+  usuario_id uuid [not null, ref: > usuarios.id]
+  sede_id uuid [not null, ref: > sedes.id]
+  tipo tipo_movimiento [not null]
+  observacion text
+  fecha timestamptz [not null, default: `now()`]
+  Note: 'Cadena de custodia. Inmutable (solo INSERT)'
+}
+
+// ---------------------------------------------------------------------
+// Reclamos, entrega y auditoría
+// ---------------------------------------------------------------------
+Table reclamos [headercolor: #854F0B] {
+  id uuid [pk, default: `gen_random_uuid()`]
+  tenant_id uuid [not null]
+  objeto_id uuid [not null, ref: > objetos_encontrados.id]
+  reclamante_id uuid [not null, ref: > usuarios.id]
+  evaluado_por uuid [ref: > usuarios.id]
+  estado estado_reclamo [not null, default: 'pendiente']
+  intentos_fallidos smallint [not null, default: 0]
+  bloqueado_hasta timestamptz [note: 'HU-04: bloqueo tras 3 fallos']
+  motivo_rechazo text
+  evaluado_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+  indexes {
+    (objeto_id, reclamante_id) [unique]
+  }
+}
+
+Table respuestas_reclamo [headercolor: #854F0B] {
+  id uuid [pk, default: `gen_random_uuid()`]
+  tenant_id uuid [not null]
+  reclamo_id uuid [not null, ref: > reclamos.id]
+  pregunta_id uuid [not null, ref: > preguntas_desempate.id]
+  respuesta text [not null]
+  correcta boolean
+  created_at timestamptz [not null, default: `now()`]
+}
+
+Table actas_entrega [headercolor: #854F0B] {
+  id uuid [pk, default: `gen_random_uuid()`]
+  tenant_id uuid [not null]
+  reclamo_id uuid [not null, unique, ref: - reclamos.id]
+  objeto_id uuid [not null, ref: > objetos_encontrados.id]
+  operador_id uuid [not null, ref: > usuarios.id]
+  receptor_id uuid [not null, ref: > usuarios.id]
+  rut_receptor_cifrado bytea [not null]
+  firma_r2_key text [not null]
+  hash_sha256 char(64) [not null, note: 'Sello de integridad']
+  emitida_en timestamptz [not null, default: `now()`]
+  Note: 'HU-05: acta digital inmutable (solo INSERT)'
+}
+
+Table logs_auditoria [headercolor: #5F5E5A] {
+  id bigint [pk, increment]
+  tenant_id uuid [not null, ref: > tenants.id]
+  usuario_id uuid
+  accion text [not null]
+  entidad text [not null]
+  entidad_id uuid
+  metadata jsonb [not null, default: '{}']
+  ip inet
+  created_at timestamptz [not null, default: `now()`]
+  Note: 'HU-05: log de auditoría inmutable (solo INSERT)'
+}
+
+// Agrupaciones visuales
+TableGroup nucleo_multitenant {
+  tenants
+  tenant_dominios
+  sedes
+}
+
+TableGroup usuarios_y_acceso {
+  usuarios
+  otp_codigos
+}
+
+TableGroup catalogo_y_custodia {
+  categorias
+  bienes_enrolados
+  objetos_encontrados
+  fotos_objeto
+  preguntas_desempate
+  movimientos_custodia
+}
+
+TableGroup reclamos_y_entrega {
+  reclamos
+  respuestas_reclamo
+  actas_entrega
+  logs_auditoria
+}
