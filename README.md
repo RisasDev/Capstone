@@ -215,7 +215,7 @@ flowchart TB
     RS["Resend<br/>correo transaccional"]
     TS["Cloudflare Turnstile<br/>captcha"]
 
-    U -->|"app.backtome.io"| C
+    U -->|"app.backtome.site"| C
     C -->|"/"| W
     C -->|"/api/*"| A
     U -.->|"inicio de sesión"| AU
